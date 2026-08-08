@@ -6,10 +6,14 @@ export class AlgoServiceContainer {
 }
 
 export interface Env {
-  AI: any; // Cloudflare Workers AI binding
+  AI: any;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   ALGO_API_KEY?: string;
+  UPSTASH_REDIS_REST_URL?: string;
+  UPSTASH_REDIS_REST_TOKEN?: string;
+  QDRANT_URL?: string;
+  QDRANT_API_KEY?: string;
 }
 
 export default {
@@ -18,7 +22,6 @@ export default {
     const path = url.pathname;
     const method = request.method.toUpperCase();
 
-    // CORS Headers
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -29,12 +32,21 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Health check endpoint
     if (path === "/health" || path === "/") {
-      return jsonResponse({ status: "ok", service: "culinari-algorithm-worker", version: "v1" }, 200, corsHeaders);
+      return jsonResponse({
+        status: "ok",
+        service: "culinari-algorithm-worker",
+        version: "v2",
+        features: {
+          gemini_moderation: true,
+          workers_ai_embeddings: Boolean(env.AI),
+          upstash_redis: Boolean(env.UPSTASH_REDIS_REST_URL),
+          qdrant_vector_db: Boolean(env.QDRANT_URL)
+        }
+      }, 200, corsHeaders);
     }
 
-    // Auth Middleware: Check Bearer token if ALGO_API_KEY is configured
+    // Optional API Key Auth Middleware
     const authHeader = request.headers.get("Authorization");
     const requiredApiKey = env.ALGO_API_KEY || process.env.ALGO_API_KEY;
     if (requiredApiKey) {
@@ -52,7 +64,6 @@ export default {
         let imageBase64 = body.image_base64 || null;
         let mimeType = body.mime_type || "image/jpeg";
 
-        // Fetch image if image_url is provided
         if (body.image_url && !imageBase64) {
           try {
             const imgRes = await fetch(body.image_url);
@@ -80,16 +91,20 @@ export default {
           }, 200, corsHeaders);
         }
 
-        const prompt = (
-          "You are a strict content moderator for Culinari, a food video and recipe sharing platform.\n" +
-          "Your absolute rule is: only food, cooking, culinary arts, dining, kitchen, ingredients, and recipes are allowed.\n" +
-          "Analyze the provided text and any associated image and determine if this content is strictly related to food, cooking, or culinary activities.\n" +
-          `Title: '${title}'\n` +
-          `Description: '${description}'\n\n` +
-          "Respond ONLY with a JSON object containing the keys: 'is_food' (boolean), 'confidence' (number 0.0-1.0), and 'reason' (string short explanation)."
-        );
+        const promptText = `You are a content moderation AI for "Culinari", a culinary and recipe social video/photo platform.
+Analyze the following post title, description, and image (if provided).
+Determine if the content is related to food, cooking, recipes, dining, beverages, or culinary arts.
 
-        const parts: any[] = [{ text: prompt }];
+Post Title: "${title}"
+Post Description: "${description}"
+
+Respond strictly in valid JSON format with three keys:
+1. "is_food": boolean (true if culinary/food related, false if off-topic like cars, finance, sports, tech, hate speech, etc.)
+2. "confidence": number (between 0.0 and 1.0)
+3. "reason": string (brief 1-sentence explanation of your evaluation)`;
+
+        const parts: any[] = [{ text: promptText }];
+
         if (imageBase64) {
           parts.push({
             inlineData: {
@@ -102,6 +117,7 @@ export default {
         const geminiPayload = {
           contents: [{ parts }],
           generationConfig: {
+            temperature: 0.1,
             responseMimeType: "application/json",
             responseSchema: {
               type: "OBJECT",
@@ -129,12 +145,18 @@ export default {
         }
 
         const geminiData: any = await geminiRes.json();
-        const textResponse = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!textResponse) {
-          return jsonResponse({ detail: "No content returned from Gemini model" }, 502, corsHeaders);
+        const responseText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!responseText) {
+          return jsonResponse({ detail: "Empty response from Gemini API" }, 500, corsHeaders);
         }
 
-        const parsed = JSON.parse(textResponse);
+        let parsed: any;
+        try {
+          parsed = JSON.parse(responseText);
+        } catch (e) {
+          parsed = { is_food: true, confidence: 0.5, reason: responseText };
+        }
+
         return jsonResponse({
           is_food: Boolean(parsed.is_food),
           confidence: Number(parsed.confidence || 0),
@@ -142,65 +164,151 @@ export default {
         }, 200, corsHeaders);
       }
 
-      // 2. Recommend Endpoint
-      if (path === "/recommend" && method === "POST") {
+      // 2. Event Tracking Endpoint & Upstash Leaderboard Updates
+      if ((path === "/event" || path === "/event/batch") && method === "POST") {
         const body: any = await request.json();
-        const userId = body.user_id || "anonymous";
-        const abBucket = Math.abs(hashString(userId)) % 100;
-        return jsonResponse({
-          user_id: userId,
-          algo_version: "v1",
-          ab_bucket: abBucket,
-          items: []
-        }, 200, corsHeaders);
+        const events = Array.isArray(body) ? body : [body];
+
+        // Process event weights for trending leaderboard
+        for (const evt of events) {
+          const contentId = evt.content_id;
+          const eventType = evt.event_type;
+          if (!contentId || !eventType) continue;
+
+          let weight = evt.weight || 1.0;
+          if (eventType === "like") weight = 1.0;
+          else if (eventType === "comment") weight = 2.0;
+          else if (eventType === "save") weight = 3.0;
+          else if (eventType === "share") weight = 4.0;
+          else if (eventType === "watch_complete") weight = 2.5;
+          else if (eventType === "skip" || eventType === "not_interested") weight = -2.0;
+
+          // Increment content score in Upstash Redis Sorted Set
+          if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+            await redisCommand(env, ["ZINCRBY", "trending_content", weight.toString(), contentId]);
+          }
+        }
+
+        return jsonResponse({ ok: true, count: events.length }, 200, corsHeaders);
       }
 
-      // 3. Rank Endpoint
-      if (path === "/rank" && method === "POST") {
-        const body: any = await request.json();
-        const candidateIds: string[] = body.candidate_ids || [];
-        const items = candidateIds.map(id => ({ content_id: id, score: 0.0 }));
-        return jsonResponse({
-          user_id: body.user_id || "",
-          items
-        }, 200, corsHeaders);
-      }
+      // 3. GET /trending Endpoint (Retrieves Top Trending Content from Upstash Redis)
+      if ((path === "/trending" || path === "/feed/trending") && method === "GET") {
+        const limit = Number(url.searchParams.get("limit") || 20);
+        let trendingItems: { content_id: string; score: number }[] = [];
 
-      // 4. Embed Endpoints (Demonstrating Cloudflare Workers AI Embeddings)
-      if (path === "/embed/content" && method === "POST") {
-        const body: any = await request.json();
-        let embeddingVector = null;
-
-        // Generate vector embedding using Cloudflare Workers AI if text is present
-        const textToEmbed = [body.title, body.caption, body.description].filter(Boolean).join(" ");
-        if (textToEmbed && env.AI) {
-          try {
-            const aiRes = await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: [textToEmbed] });
-            embeddingVector = aiRes?.data?.[0] || null;
-          } catch (aiErr) {
-            console.error("Workers AI embedding error:", aiErr);
+        if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+          // ZREVRANGE trending_content 0 (limit - 1) WITHSCORES
+          const redisRes = await redisCommand(env, ["ZREVRANGE", "trending_content", "0", (limit - 1).toString(), "WITHSCORES"]);
+          if (Array.isArray(redisRes?.result)) {
+            const raw: string[] = redisRes.result;
+            for (let i = 0; i < raw.length; i += 2) {
+              trendingItems.push({
+                content_id: raw[i],
+                score: parseFloat(raw[i + 1] || "0")
+              });
+            }
           }
         }
 
         return jsonResponse({
           ok: true,
-          content_id: body.content_id,
-          content_type: body.content_type,
-          has_vector: Boolean(embeddingVector),
-          vector_dimensions: embeddingVector ? embeddingVector.length : 0
+          algo_version: "v2-redis-trending",
+          items: trendingItems
         }, 200, corsHeaders);
       }
 
-      if (path === "/embed/user" && method === "POST") {
+      // 4. Embed Content Endpoint (Workers AI + Qdrant Cloud Vector Indexing)
+      if (path === "/embed/content" && method === "POST") {
         const body: any = await request.json();
-        return jsonResponse({ ok: true, user_id: body.user_id }, 200, corsHeaders);
+        const contentId = body.content_id;
+        const textToEmbed = [body.title, body.caption, body.description, body.cuisine, ...(body.tags || [])].filter(Boolean).join(" ");
+        let vector: number[] | null = null;
+
+        if (textToEmbed && env.AI) {
+          try {
+            const aiRes = await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: [textToEmbed] });
+            vector = aiRes?.data?.[0] || null;
+          } catch (aiErr) {
+            console.error("Workers AI embedding error:", aiErr);
+          }
+        }
+
+        // Upsert vector into Qdrant Cloud collection "culinari_content"
+        let qdrantUpsertOk = false;
+        if (vector && contentId && env.QDRANT_URL && env.QDRANT_API_KEY) {
+          await ensureQdrantCollection(env);
+          const qdrantRes = await qdrantRequest(env, "/collections/culinari_content/points", "PUT", {
+            points: [
+              {
+                id: hashStringToUuid(contentId),
+                vector: vector,
+                payload: {
+                  content_id: contentId,
+                  content_type: body.content_type || "video",
+                  creator_id: body.creator_id || "",
+                  cuisine: body.cuisine || "",
+                  title: body.title || ""
+                }
+              }
+            ]
+          });
+          qdrantUpsertOk = qdrantRes?.status === "ok";
+        }
+
+        return jsonResponse({
+          ok: true,
+          content_id: contentId,
+          vector_dimensions: vector ? vector.length : 0,
+          qdrant_indexed: qdrantUpsertOk
+        }, 200, corsHeaders);
       }
 
-      // 5. Event Endpoints
-      if ((path === "/event" || path === "/event/batch") && method === "POST") {
+      // 5. Recommend Endpoint (Qdrant Vector Similarity Search)
+      if (path === "/recommend" && method === "POST") {
         const body: any = await request.json();
-        const count = Array.isArray(body) ? body.length : 1;
-        return jsonResponse({ ok: true, count }, 200, corsHeaders);
+        const userId = body.user_id || "anonymous";
+        const limit = body.limit || 20;
+        let recommendedItems: any[] = [];
+
+        // If query_text is passed or we generate a default vector
+        const queryText = body.query_text || body.cuisine || "popular recipe video";
+        let queryVector: number[] | null = null;
+
+        if (queryText && env.AI) {
+          try {
+            const aiRes = await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: [queryText] });
+            queryVector = aiRes?.data?.[0] || null;
+          } catch (aiErr) {
+            console.error("Workers AI query vector error:", aiErr);
+          }
+        }
+
+        if (queryVector && env.QDRANT_URL && env.QDRANT_API_KEY) {
+          await ensureQdrantCollection(env);
+          const searchRes = await qdrantRequest(env, "/collections/culinari_content/points/search", "POST", {
+            vector: queryVector,
+            limit: limit,
+            with_payload: true
+          });
+
+          if (Array.isArray(searchRes?.result)) {
+            recommendedItems = searchRes.result.map((pt: any) => ({
+              content_id: pt.payload?.content_id || pt.id,
+              content_type: pt.payload?.content_type || "video",
+              score: pt.score,
+              title: pt.payload?.title || ""
+            }));
+          }
+        }
+
+        const abBucket = Math.abs(hashString(userId)) % 100;
+        return jsonResponse({
+          user_id: userId,
+          algo_version: "v2-qdrant-vector",
+          ab_bucket: abBucket,
+          items: recommendedItems
+        }, 200, corsHeaders);
       }
 
       return jsonResponse({ detail: "Not Found" }, 404, corsHeaders);
@@ -212,6 +320,7 @@ export default {
   }
 };
 
+// Helper Functions
 function jsonResponse(data: any, status: number = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -240,4 +349,70 @@ function hashString(str: string): number {
     hash |= 0;
   }
   return hash;
+}
+
+function hashStringToUuid(str: string): string {
+  let hash1 = 0, hash2 = 0, hash3 = 0, hash4 = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash1 = (hash1 * 31 + char) >>> 0;
+    hash2 = (hash2 * 37 + char) >>> 0;
+    hash3 = (hash3 * 41 + char) >>> 0;
+    hash4 = (hash4 * 43 + char) >>> 0;
+  }
+  const hex1 = hash1.toString(16).padStart(8, '0');
+  const hex2 = hash2.toString(16).padStart(4, '0').slice(0, 4);
+  const hex3 = hash3.toString(16).padStart(4, '0').slice(0, 4);
+  const hex4 = hash4.toString(16).padStart(4, '0').slice(0, 4);
+  const hex5 = (hash1 ^ hash4).toString(16).padStart(12, '0').slice(0, 12);
+  return `${hex1}-${hex2}-4${hex3.slice(1)}-8${hex4.slice(1)}-${hex5}`;
+}
+
+async function redisCommand(env: Env, command: string[]) {
+  if (!env.UPSTASH_REDIS_REST_URL || !env.UPSTASH_REDIS_REST_TOKEN) return null;
+  try {
+    const res = await fetch(env.UPSTASH_REDIS_REST_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.UPSTASH_REDIS_REST_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(command)
+    });
+    return await res.json();
+  } catch (err) {
+    console.error("Upstash Redis error:", err);
+    return null;
+  }
+}
+
+async function qdrantRequest(env: Env, path: string, method: string = "GET", body: any = null) {
+  if (!env.QDRANT_URL || !env.QDRANT_API_KEY) return null;
+  try {
+    const options: any = {
+      method,
+      headers: {
+        "api-key": env.QDRANT_API_KEY,
+        "Content-Type": "application/json"
+      }
+    };
+    if (body) options.body = JSON.stringify(body);
+    const res = await fetch(`${env.QDRANT_URL}${path}`, options);
+    return await res.json();
+  } catch (err) {
+    console.error("Qdrant Cloud error:", err);
+    return null;
+  }
+}
+
+async function ensureQdrantCollection(env: Env) {
+  const getRes: any = await qdrantRequest(env, "/collections/culinari_content");
+  if (getRes?.status !== "ok") {
+    await qdrantRequest(env, "/collections/culinari_content", "PUT", {
+      vectors: {
+        size: 384,
+        distance: "Cosine"
+      }
+    });
+  }
 }
