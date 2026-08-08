@@ -352,19 +352,24 @@ function hashString(str: string): number {
 }
 
 function hashStringToUuid(str: string): string {
-  let hash1 = 0, hash2 = 0, hash3 = 0, hash4 = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash1 = (hash1 * 31 + char) >>> 0;
-    hash2 = (hash2 * 37 + char) >>> 0;
-    hash3 = (hash3 * 41 + char) >>> 0;
-    hash4 = (hash4 * 43 + char) >>> 0;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)) {
+    return str.toLowerCase();
   }
-  const hex1 = hash1.toString(16).padStart(8, '0');
-  const hex2 = hash2.toString(16).padStart(4, '0').slice(0, 4);
-  const hex3 = hash3.toString(16).padStart(4, '0').slice(0, 4);
-  const hex4 = hash4.toString(16).padStart(4, '0').slice(0, 4);
-  const hex5 = (hash1 ^ hash4).toString(16).padStart(12, '0').slice(0, 12);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57, h3 = 0xfae12345, h4 = 0x12345678;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+    h3 = Math.imul(h3 ^ ch, 2246822507);
+    h4 = Math.imul(h4 ^ ch, 3266489917);
+  }
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, "0");
+  const hex2 = (h2 >>> 0).toString(16).padStart(4, "0").slice(0, 4);
+  const hex3 = (h3 >>> 0).toString(16).padStart(4, "0").slice(0, 4);
+  const hex4 = (h4 >>> 0).toString(16).padStart(4, "0").slice(0, 4);
+  const part1 = ((h1 ^ h4) >>> 0).toString(16).padStart(8, "0");
+  const part2 = ((h2 ^ h3) >>> 0).toString(16).padStart(4, "0").slice(0, 4);
+  const hex5 = (part1 + part2).slice(0, 12);
   return `${hex1}-${hex2}-4${hex3.slice(1)}-8${hex4.slice(1)}-${hex5}`;
 }
 
