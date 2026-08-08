@@ -1,17 +1,7 @@
 name: Dependency Security
 
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+on: [workflow_dispatch]
 
 jobs:
   node-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm audit --audit-level=high || true
+    uses: the-culinari/workflows/.github/workflows/dependency-scanning-node.yml@main
