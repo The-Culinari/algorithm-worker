@@ -70,7 +70,7 @@ export default {
         }
 
         const geminiApiKey = env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-        const geminiModel = env.GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+        const geminiModel = env.GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
         if (!geminiApiKey) {
           return jsonResponse({
