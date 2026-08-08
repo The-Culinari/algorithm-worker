@@ -8,10 +8,11 @@ on:
 
 jobs:
   release-please:
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
-    uses: The-Culinari/workflows/.github/workflows/release-please.yml@main
-    with:
-      release-type: "node"
-    secrets: inherit
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: node
