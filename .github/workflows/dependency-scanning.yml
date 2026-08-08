@@ -1,0 +1,7 @@
+name: Dependency Security
+
+on: [workflow_dispatch]
+
+jobs:
+  node-audit:
+    uses: The-Culinari/workflows/.github/workflows/dependency-scanning-node.yml@main
