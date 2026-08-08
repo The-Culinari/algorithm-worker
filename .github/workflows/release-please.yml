@@ -4,12 +4,13 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   release-please:
     permissions:
       contents: write
       pull-requests: write
-    uses: the-culinari/workflows/.github/workflows/release-please.yml@main
+    uses: The-Culinari/workflows/.github/workflows/release-please.yml@main
     with:
       release-type: "node"
