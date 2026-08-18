@@ -2,6 +2,9 @@ name: Dependency Security
 
 on: [workflow_dispatch]
 
+permissions:
+  contents: read
+
 jobs:
   node-audit:
     uses: the-culinari/workflows/.github/workflows/dependency-scanning-node.yml@main
